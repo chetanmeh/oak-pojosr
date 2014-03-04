@@ -19,6 +19,9 @@
 
 package org.apache.jackrabbit.oak.run.osgi;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.ServiceLoader;
@@ -35,8 +38,11 @@ import de.kalpatec.pojosr.framework.launch.ClasspathScanner;
 import de.kalpatec.pojosr.framework.launch.PojoServiceRegistry;
 import de.kalpatec.pojosr.framework.launch.PojoServiceRegistryFactory;
 import org.apache.commons.io.FilenameUtils;
+import org.apache.jackrabbit.api.JackrabbitRepository;
 import org.osgi.framework.BundleException;
 import org.osgi.framework.Constants;
+import org.osgi.framework.ServiceReference;
+import org.osgi.util.tracker.ServiceTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -82,7 +88,8 @@ public class OakOSGiRepositoryFactory implements RepositoryFactory{
         try {
             return repoFuture.get(timeout, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            throw new RepositoryException(e);
+            Thread.currentThread().interrupt();
+            throw new RepositoryException("Repository initialization was interrupted");
         } catch (ExecutionException e) {
             throw new RepositoryException(e);
         } catch (TimeoutException e) {
@@ -96,6 +103,12 @@ public class OakOSGiRepositoryFactory implements RepositoryFactory{
         }
     }
 
+    /**
+     * Enables post processing of service registry e.g. registering new services etc
+     * by sub classes
+     *
+     * @param registry service registry
+     */
     protected void postProcessRegistry(PojoServiceRegistry registry){
 
     }
@@ -141,6 +154,70 @@ public class OakOSGiRepositoryFactory implements RepositoryFactory{
             return loader.iterator().next().newPojoServiceRegistry(config);
         } catch (Exception e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static class RepositoryTracker extends ServiceTracker {
+        private final SettableFuture<Repository> repoFuture;
+        private RepositoryProxy proxy;
+
+        public RepositoryTracker(PojoServiceRegistry registry, SettableFuture<Repository> repoFuture) {
+            super(registry.getBundleContext(), Repository.class.getName(), null);
+            this.repoFuture = repoFuture;
+            this.open();
+        }
+
+        @Override
+        public Object addingService(ServiceReference reference) {
+            Object service = super.addingService(reference);
+            if(proxy == null){
+                //As its possible that future is accessed before the service
+                //get registered with tracker. We also capture the initial reference
+                //and use that for the first access case
+                repoFuture.set(createProxy((Repository) service));
+            }
+            return service;
+        }
+
+        @Override
+        public void removedService(ServiceReference reference, Object service) {
+            if(proxy != null){
+                proxy.clearInitialReference();
+            }
+        }
+
+        private Repository createProxy(Repository service) {
+            proxy = new RepositoryProxy(this,service);
+            return (Repository) Proxy.newProxyInstance(getClass().getClassLoader(),
+                    new Class[] {Repository.class, JackrabbitRepository.class}, proxy);
+        }
+    }
+
+    /**
+     * Due to the way SecurityConfiguration is managed in OSGi env its possible
+     * that repository gets created/shutdown few times. So need to have a proxy
+     * to access the latest service
+     */
+    private static class RepositoryProxy implements InvocationHandler {
+        private final RepositoryTracker tracker;
+        private Repository initialService;
+
+        private RepositoryProxy(RepositoryTracker tracker, Repository initialService) {
+            this.tracker = tracker;
+            this.initialService = initialService;
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            Object obj = tracker.getService();
+            if(obj == null){
+                obj = initialService;
+            }
+            return method.invoke(obj, args);
+        }
+
+        public void clearInitialReference(){
+            this.initialService = null;
         }
     }
 

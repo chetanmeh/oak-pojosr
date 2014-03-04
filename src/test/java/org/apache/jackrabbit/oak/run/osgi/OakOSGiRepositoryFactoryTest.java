@@ -21,8 +21,11 @@ package org.apache.jackrabbit.oak.run.osgi;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import javax.jcr.Node;
 import javax.jcr.Repository;
@@ -31,20 +34,31 @@ import javax.jcr.RepositoryFactory;
 import javax.jcr.Session;
 import javax.jcr.SimpleCredentials;
 
+import de.kalpatec.pojosr.framework.launch.PojoServiceRegistry;
 import org.apache.commons.io.FileUtils;
 import org.apache.jackrabbit.api.JackrabbitRepository;
+import org.apache.jackrabbit.api.JackrabbitSession;
+import org.apache.jackrabbit.api.security.user.User;
 import org.apache.jackrabbit.commons.JcrUtils;
+import org.apache.jackrabbit.oak.api.Root;
+import org.apache.jackrabbit.oak.namepath.NamePathMapper;
+import org.apache.jackrabbit.oak.spi.security.SecurityProvider;
+import org.apache.jackrabbit.oak.spi.security.user.action.AbstractAuthorizableAction;
+import org.apache.jackrabbit.oak.spi.security.user.action.AuthorizableAction;
+import org.apache.jackrabbit.oak.spi.security.user.action.AuthorizableActionProvider;
 import org.junit.Before;
 import org.junit.Test;
 
 import static org.apache.commons.io.FilenameUtils.concat;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
 public class OakOSGiRepositoryFactoryTest {
 
     private String repositoryHome;
-    private RepositoryFactory repositoryFactory = new OakOSGiRepositoryFactory();
+    private RepositoryFactory repositoryFactory = new CustomOakFactory();
     private Map config = new HashMap();
+    private String newPassword;
 
     @Before
     public void setUp() throws IOException {
@@ -63,11 +77,40 @@ public class OakOSGiRepositoryFactoryTest {
         copyConfig("tar");
 
         Repository repository = repositoryFactory.getRepository(config);
+
+        //Give time for system to stablize :(
+        TimeUnit.SECONDS.sleep(1);
+
         assertNotNull(repository);
-        basicCrudTest(repository);
         System.out.println("Repository started ");
 
+        basicCrudTest(repository);
+
+        //For now SecurityConfig is giving some issue
+        //so disable that
+        //testCallback(repository);
+
+
         shutdown(repository);
+    }
+
+    private void testCallback(Repository repository) throws RepositoryException {
+        JackrabbitSession session = (JackrabbitSession)
+                repository.login(new SimpleCredentials("admin", "admin".toCharArray()));
+
+        String testUserId = "footest";
+
+        User testUser  = (User) session.getUserManager().getAuthorizable(testUserId);
+        if(testUser == null){
+            session.getUserManager().createUser(testUserId,"password");
+        }
+
+        session.save();
+
+        testUser.changePassword("newPassword");
+        session.save();
+
+        assertEquals("newPassword",newPassword);
     }
 
     private void basicCrudTest(Repository repository) throws RepositoryException {
@@ -94,5 +137,27 @@ public class OakOSGiRepositoryFactoryTest {
 
     private static String getBaseDir(){
         return new File(".").getAbsolutePath();
+    }
+
+    private class CustomOakFactory extends OakOSGiRepositoryFactory {
+
+        @Override
+        protected void postProcessRegistry(PojoServiceRegistry registry) {
+            registry.registerService(AuthorizableActionProvider.class.getName(), new AuthorizableActionProvider() {
+                @Override
+                public List<? extends AuthorizableAction> getAuthorizableActions(SecurityProvider securityProvider) {
+                    return Collections.singletonList(new TestAction());
+                }
+            }, null);
+        }
+    }
+
+    private class TestAction extends AbstractAuthorizableAction {
+
+        @Override
+        public void onPasswordChange(User user, String newPassword,
+                                     Root root, NamePathMapper namePathMapper) throws RepositoryException {
+            OakOSGiRepositoryFactoryTest.this.newPassword = newPassword;
+        }
     }
 }
