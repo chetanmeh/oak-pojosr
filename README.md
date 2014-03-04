@@ -7,6 +7,7 @@ support. This would enable usage of Oak in POJO env and would still enable usage
 to customize Oak components.
 
 To make use of this following dependencies are required
+
 1. PojoSR - Provides the OSGi framework support
 2. Apache Felix SCR
 3. Apache Felix Config Admin
